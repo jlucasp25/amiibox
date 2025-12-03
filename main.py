@@ -1,8 +1,8 @@
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.security import OAuth2PasswordBearer
-from sqlmodel import SQLModel, create_engine, Session, select
-from pydantic import BaseModel
-from typing import Annotated
+from sqlmodel import SQLModel, create_engine, Session, select, Field, Relationship
+from typing import Annotated, Optional
+from contextlib import asynccontextmanager
 
 sqlite_filename = "amiibox.db"
 sqlite_url = f"sqlite:///{sqlite_filename}"
@@ -10,25 +10,63 @@ connect_args = {"check_same_thread": False}
 engine = create_engine(sqlite_url, connect_args=connect_args)
 
 
-class AmiiboSeries(BaseModel):
-    id: int
-    name: str
+# Link table for User's owned amiibos (many-to-many)
+class UserOwnedAmiiboLink(SQLModel, table=True):
+    user_id: int = Field(foreign_key="user.id", primary_key=True)
+    amiibo_id: int = Field(foreign_key="amiibo.id", primary_key=True)
 
 
-class Amiibo(BaseModel):
-    id: int
+# Link table for User's wanted amiibos (many-to-many)
+class UserWantedAmiiboLink(SQLModel, table=True):
+    user_id: int = Field(foreign_key="user.id", primary_key=True)
+    amiibo_id: int = Field(foreign_key="amiibo.id", primary_key=True)
+
+
+class AmiiboSeries(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
     name: str
-    series: AmiiboSeries
+
+    # Relationship: one series has many amiibos
+    amiibos: list["Amiibo"] = Relationship(back_populates="series")
+
+
+class Amiibo(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str
     image: str
 
+    # Foreign key to AmiiboSeries
+    series_id: int = Field(foreign_key="amiiboseries.id")
 
-class User(BaseModel):
-    id: int
+    # Relationship: many amiibos belong to one series
+    series: AmiiboSeries = Relationship(back_populates="amiibos")
+
+    # Many-to-many relationships with User
+    owned_by_users: list["User"] = Relationship(
+        back_populates="owned_amiibos",
+        link_model=UserOwnedAmiiboLink
+    )
+    wanted_by_users: list["User"] = Relationship(
+        back_populates="wanted_amiibos",
+        link_model=UserWantedAmiiboLink
+    )
+
+
+class User(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
     full_name: str
     email: str
     enabled: bool = True
-    owned_amiibos: list[Amiibo]
-    wanted_amiibos: list[Amiibo]
+
+    # Many-to-many relationships with Amiibo
+    owned_amiibos: list[Amiibo] = Relationship(
+        back_populates="owned_by_users",
+        link_model=UserOwnedAmiiboLink
+    )
+    wanted_amiibos: list[Amiibo] = Relationship(
+        back_populates="wanted_by_users",
+        link_model=UserWantedAmiiboLink
+    )
 
 
 def create_db():
@@ -52,11 +90,12 @@ def convert_token_to_user(token: str) -> User:
 def get_current_user(token: TokenDep) -> User:
     return convert_token_to_user(token)
 
-app = FastAPI()
-
-@app.on_event("startup")
-def startup():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     create_db()
+    yield
+
+app = FastAPI(lifespan=lifespan)
 
 @app.get("/amiibo/")
 def amiibo_list(session: SessionDep) -> list[Amiibo]:
@@ -87,3 +126,8 @@ def amiibo_delete(id: int, session: SessionDep) -> None:
     session.delete(amiibo)
     session.commit()
     return None
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
